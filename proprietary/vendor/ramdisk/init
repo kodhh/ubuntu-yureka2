@@ -1,0 +1,89 @@
+#!/bin/sh
+
+# Minimal initramfs to boot Ubuntu from vendor partition
+
+export PATH=/sbin:/bin:/usr/sbin:/usr/bin
+
+# Mount essential filesystems
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+mount -t tmpfs tmpfs /tmp
+
+# Create device nodes if needed
+mknod /dev/null c 1 3 2>/dev/null
+mknod /dev/console c 5 1 2>/dev/null
+
+# Print boot message
+echo "YU Yureka 2 - Ubuntu Boot"
+echo "Looking for Ubuntu rootfs on vendor partition..."
+
+# Try to find and mount the Ubuntu rootfs
+ROOT_DEV=""
+
+# Method 1: Look for partition with LABEL=ubuntu
+if [ -e /dev/disk/by-label/ubuntu ]; then
+    ROOT_DEV="/dev/disk/by-label/ubuntu"
+    echo "Found Ubuntu partition by label"
+fi
+
+# Method 2: Try /dev/block/mmcblk0pXX automatically (vendor partition)
+if [ -z "$ROOT_DEV" ]; then
+    for part in /dev/block/mmcblk0p*; do
+        blkid "$part" 2>/dev/null | grep -q "ext4" && {
+            label=$(blkid "$part" 2>/dev/null | sed -n 's/.*LABEL="\([^"]*\)".*/\1/p')
+            if [ "$label" = "ubuntu" ]; then
+                ROOT_DEV="$part"
+                echo "Found Ubuntu partition at $part"
+                break
+            fi
+        }
+    done
+fi
+
+# Method 3: Use /dev/mmcblk0p43 or try common vendor partition numbers
+if [ -z "$ROOT_DEV" ]; then
+    for n in 43 44 45 46 47 48 49 50; do
+        dev="/dev/mmcblk0p$n"
+        [ -b "$dev" ] || continue
+        fstype=$(blkid "$dev" 2>/dev/null | sed -n 's/.*TYPE="\([^"]*\)".*/\1/p')
+        if [ "$fstype" = "ext4" ]; then
+            ROOT_DEV="$dev"
+            echo "Found ext4 partition at $dev"
+            break
+        fi
+    done
+fi
+
+# Method 4: cmdline parsing for root= parameter
+if [ -z "$ROOT_DEV" ]; then
+    for arg in $(cat /proc/cmdline); do
+        case "$arg" in
+            root=*)
+                ROOT_DEV="${arg#root=}"
+                echo "Using root device from cmdline: $ROOT_DEV"
+                ;;
+        esac
+    done
+fi
+
+if [ -z "$ROOT_DEV" ]; then
+    echo "ERROR: Cannot find Ubuntu rootfs partition!"
+    echo "Dropping to shell..."
+    exec sh
+fi
+
+# Mount the Ubuntu rootfs
+echo "Mounting $ROOT_DEV as rootfs..."
+mount -t ext4 -o noatime "$ROOT_DEV" /mnt/ubuntu || {
+    echo "ERROR: Failed to mount $ROOT_DEV!"
+    exec sh
+}
+
+# Clean up before switch_root
+umount /proc
+umount /sys
+
+# Switch to the Ubuntu rootfs
+echo "Switching root to /mnt/ubuntu..."
+exec switch_root /mnt/ubuntu /sbin/init
